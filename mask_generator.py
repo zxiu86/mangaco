@@ -1,7 +1,6 @@
-"""
-mask_generator.py - المولد الهجين للقناع (Hybrid Mask Generator)
-النسخة الكاملة والمُدقّقة - مع SWT بالأشعة المخروطية وفلاتر إحصائية متقدمة
-"""
+# mask_generator.py
+# المولد الهجين للقناع (Hybrid Mask Generator)
+# مُصحَّح للتوافق مع OpenCV 4.x
 
 import numpy as np
 import cv2
@@ -19,7 +18,7 @@ except ImportError:
 
 
 # ============================================================
-# 1. محرك MSER المزدوج (فاتح + غامق)
+# 1. محرك MSER المزدوج (فاتح + غامق) - مُصحَّح للـ OpenCV 4.x
 # ============================================================
 def mser_dual_extraction(
     image: np.ndarray,
@@ -31,6 +30,12 @@ def mser_dual_extraction(
 ) -> np.ndarray:
     """
     تطبيق MSER على صورتين: الأصلية والمعكوسة للحصول على مناطق داكنة وفاتحة.
+    تم تصحيح أسماء المعاملات لتتوافق مع OpenCV 4.x:
+        delta (بدلاً من _delta)
+        min_area (بدلاً من _min_area)
+        max_area (بدلاً من _max_area)
+        max_variation (بدلاً من _max_variation)
+        min_diversity (بدلاً من _min_diversity)
     """
     if image.dtype != np.uint8:
         img_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
@@ -39,12 +44,13 @@ def mser_dual_extraction(
     
     gray = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2GRAY)
 
+    # استخدام الأسماء الصحيحة للمعاملات (بدون شرطات سفلية)
     mser = cv2.MSER_create(
-        _delta=delta,
-        _min_area=min_area,
-        _max_area=max_area,
-        _max_variation=max_variation,
-        _min_diversity=min_diversity
+        delta=delta,
+        min_area=min_area,
+        max_area=max_area,
+        max_variation=max_variation,
+        min_diversity=min_diversity
     )
 
     mask = np.zeros_like(gray, dtype=np.uint8)
@@ -72,29 +78,25 @@ def mser_dual_extraction(
 def compute_gradient_field(gray: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     حساب حقل التدرج وزواياه باستخدام مشتقات صهير.
-    المدخلات: صورة رمادية float32 في [0,1].
-    المخرجات: Gx, Gy, angle (بالراديان، نطاق -pi إلى pi).
     """
-    # تخصيص البافرات الرباعية مسبقاً (مرة واحدة فقط)
     H, W = gray.shape
-    path_buffers_y = np.zeros((H, max_ray_length), dtype=np.int32)
-    path_buffers_x = np.zeros((H, max_ray_length), dtype=np.int32)
-    best_path_buffers_y = np.zeros((H, max_ray_length), dtype=np.int32)
-    best_path_buffers_x = np.zeros((H, max_ray_length), dtype=np.int32)
+    Gx = np.zeros((H, W), dtype=np.float32)
+    Gy = np.zeros((H, W), dtype=np.float32)
+    angle = np.zeros((H, W), dtype=np.float32)
 
-# تمريرها للدالة التوازنية
-  swt_map = swt_cone_ray(
-     gray, Gx, Gy, edge_mask,
-     path_buffers_y, path_buffers_x,
-     best_path_buffers_y, best_path_buffers_x,
-     cone_angle_rad, max_ray_length=300
-)
+    for y in range(1, H - 1):
+        for x in range(1, W - 1):
+            gx = (gray[y, x+1] - gray[y, x-1]) * 0.5
+            gy = (gray[y+1, x] - gray[y-1, x]) * 0.5
+            Gx[y, x] = gx
+            Gy[y, x] = gy
+            angle[y, x] = np.arctan2(gy, gx)
 
     return Gx, Gy, angle
 
 
 # ============================================================
-# 3. SWT بالأشعة المخروطية (النسخة الكاملة والمُدقّقة)
+# 3. SWT بالأشعة المخروطية (مع تخصيص مسبق للذاكرة)
 # ============================================================
 @njit(cache=True, parallel=True)
 def swt_cone_ray(
@@ -102,24 +104,21 @@ def swt_cone_ray(
     Gx: np.ndarray,
     Gy: np.ndarray,
     edge_mask: np.ndarray,
-    path_buffers_y: np.ndarray,        # مصفوفة (H, max_ray_length) مخصصة مسبقاً
-    path_buffers_x: np.ndarray,        # مصفوفة (H, max_ray_length) مخصصة مسبقاً
-    best_path_buffers_y: np.ndarray,   # مصفوفة (H, max_ray_length) مخصصة مسبقاً
-    best_path_buffers_x: np.ndarray,   # مصفوفة (H, max_ray_length) مخصصة مسبقاً
+    path_buffers_y: np.ndarray,
+    path_buffers_x: np.ndarray,
+    best_path_buffers_y: np.ndarray,
+    best_path_buffers_x: np.ndarray,
     cone_angle: float = 0.61,
     max_ray_length: int = 300
 ) -> np.ndarray:
     """
-    قذف أشعة مخروطية مع تخصيص مسبق للذاكرة (Pre-allocated Buffers).
-    المصفوفات الرباعية (path_buffers_*) بحجم (H, max_ray_length) يتم تمريرها من الخارج
-    لتجنب استدعاء np.zeros داخل الحلقات التوازنية.
+    قذف أشعة مخروطية مع تخصيص مسبق للذاكرة.
     """
     H, W = gray.shape
     swt_map = np.zeros((H, W), dtype=np.float32)
     angles = np.array([0.0, cone_angle, -cone_angle], dtype=np.float32)
 
     for y in prange(H):
-        # جلب الشرائح الخاصة بهذا الصف (معزولة تماماً عن باقي الصفوف)
         path_x = path_buffers_x[y]
         path_y = path_buffers_y[y]
         best_path_x = best_path_buffers_x[y]
@@ -197,107 +196,10 @@ def swt_cone_ray(
                         swt_map[py, px] = best_ray_length
 
     return swt_map
-        # ============================================================
-        # تخصيص مصفوفات مؤقتة خاصة بكل خيط (معزولة)
-        # لمنع تزاحم الذاكرة بين الأنوية (Race Condition)
-        # ============================================================
-        path_x = np.zeros(max_ray_length, dtype=np.int32)
-        path_y = np.zeros(max_ray_length, dtype=np.int32)
-        best_path_x = np.zeros(max_ray_length, dtype=np.int32)
-        best_path_y = np.zeros(max_ray_length, dtype=np.int32)
-
-        for x in range(W):
-            if edge_mask[y, x] == 0:
-                continue
-
-            # اتجاه التدرج
-            gx = Gx[y, x]
-            gy = Gy[y, x]
-            norm = np.sqrt(gx*gx + gy*gy)
-            if norm < 1e-8:
-                continue
-
-            dx = gx / norm
-            dy = gy / norm
-
-            best_ray_length = 0.0
-            best_path_len = 0
-
-            # فحص الزوايا الثلاث (أساسي، +زاوية، -زاوية)
-            for angle_idx in range(angles.shape[0]):
-                offset_angle = angles[angle_idx]
-                cos_a = np.cos(offset_angle)
-                sin_a = np.sin(offset_angle)
-                dir_x = dx * cos_a - dy * sin_a
-                dir_y = dy * cos_a + dx * sin_a
-
-                # ============================================================
-                # إعادة تعيين متغيرات البداية لكل شعاع (التصحيح الأساسي)
-                # لمنع تراكم الأطوال من الشعاع السابق
-                # ============================================================
-                cur_y = float(y)
-                cur_x = float(x)
-                ray_length = 0.0
-                path_len = 0
-                hit = False
-
-                # السير بالشعاع
-                step = 0.5
-                for step_idx in range(max_ray_length):
-                    cur_y += dir_y * step
-                    cur_x += dir_x * step
-                    ray_length += step
-
-                    yi = int(np.round(cur_y))
-                    xi = int(np.round(cur_x))
-
-                    # التحقق من حدود الصورة
-                    if yi < 0 or yi >= H or xi < 0 or xi >= W:
-                        break
-
-                    # تخزين المسار (لتعيين قيم السُمك لاحقاً)
-                    if path_len < max_ray_length:
-                        path_y[path_len] = yi
-                        path_x[path_len] = xi
-                        path_len += 1
-
-                    # التحقق من الحافة المقابلة (اتجاه تدرج معاكس)
-                    if edge_mask[yi, xi] == 1:
-                        gx2 = Gx[yi, xi]
-                        gy2 = Gy[yi, xi]
-                        norm2 = np.sqrt(gx2*gx2 + gy2*gy2)
-                        if norm2 > 1e-8:
-                            dot = (gx * gx2 + gy * gy2) / (norm * norm2)
-                            if dot < -0.3:  # اتجاه معاكس بدرجة كافية
-                                hit = True
-                                break
-
-                if hit:
-                    # اختيار أقصر شعاع (الأكثر دقة)
-                    if best_ray_length == 0.0 or ray_length < best_ray_length:
-                        best_ray_length = ray_length
-                        best_path_len = path_len
-                        # نسخ المسار الحالي إلى المسار الأفضل
-                        for p in range(path_len):
-                            best_path_x[p] = path_x[p]
-                            best_path_y[p] = path_y[p]
-
-            # ============================================================
-            # تعيين قيم السُمك للبكسلات التي مر بها الشعاع الأفضل
-            # يتم تخزين أقصر قيمة سُمك لكل بكسل (لمنع التضارب)
-            # ============================================================
-            if best_path_len > 0:
-                for p in range(best_path_len):
-                    py = best_path_y[p]
-                    px = best_path_x[p]
-                    if swt_map[py, px] == 0.0 or best_ray_length < swt_map[py, px]:
-                        swt_map[py, px] = best_ray_length
-
-    return swt_map
 
 
 # ============================================================
-# 4. الفلاتر الإحصائية السبعة (High-Order Filtering)
+# 4. الفلاتر الإحصائية السبعة
 # ============================================================
 def apply_statistical_filters(
     swt_map: np.ndarray,
@@ -311,17 +213,7 @@ def apply_statistical_filters(
 ) -> np.ndarray:
     """
     تطبيق الفلاتر الإحصائية السبعة على المكونات المتصلة المستخرجة من SWT.
-    
-    الفلاتر:
-    1. تباين السُمك الموضعي (σ/μ < 0.45)
-    2. نسبة الاستطالة (0.1 < عرض/ارتفاع < 10)
-    3. الكثافة (Solidity > 0.15)
-    4. السُمك المطلق (μ < max(H,W) * 0.05)
-    5. المساحة (area > min_area)
-    6. نسبة المحيط إلى المساحة (اختياري)
-    7. عدد الثقوب (اختياري)
     """
-    # المكونات المتصلة من البكسلات التي لها قيمة سُمك > 0
     mask_swt = (swt_map > 0).astype(np.uint8)
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
         mask_swt, connectivity=8
@@ -339,11 +231,9 @@ def apply_statistical_filters(
         width = stats[i, cv2.CC_STAT_WIDTH]
         height = stats[i, cv2.CC_STAT_HEIGHT]
 
-        # فلتر المساحة
         if area < min_area:
             continue
 
-        # استخراج قيم السُمك داخل المكون
         component_mask = (labels == i)
         swt_values = swt_map[component_mask]
         swt_values = swt_values[swt_values > 0]
@@ -357,66 +247,50 @@ def apply_statistical_filters(
         if mu_swt <= 0:
             continue
 
-        # الفلتر 1: تباين السُمك
         stroke_variation = sigma_swt / mu_swt
         if stroke_variation > (1 - min_stroke_ratio):
             continue
 
-        # الفلتر 2: نسبة الاستطالة
         aspect = width / height if height > 0 else 0
         if aspect < min_aspect_ratio or aspect > max_aspect_ratio:
             continue
 
-        # الفلتر 3: الكثافة (Solidity)
         bbox_area = width * height
         solidity = area / bbox_area if bbox_area > 0 else 0
         if solidity < min_solidity:
             continue
 
-        # الفلتر 4: السُمك المطلق
         if mu_swt > max_dim * max_stroke_relative:
             continue
 
-        # قبول المكون
         filtered_mask[component_mask] = 1
 
     return filtered_mask
 
 
 # ============================================================
-# 5. الإغلاق المورفولوجي النهائي
+# 5. العمليات المورفولوجية
 # ============================================================
 def morphological_close(
     mask: np.ndarray,
     kernel_size: int = 3,
     iterations: int = 1
 ) -> np.ndarray:
-    """
-    إغلاق الثغرات داخل الحروف والظلال باستخدام نواة بيضاوية.
-    """
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=iterations)
-    return closed
+    return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=iterations)
 
 
-# ============================================================
-# 6. الفتح المورفولوجي لإزالة النويز (اختياري)
-# ============================================================
 def morphological_open(
     mask: np.ndarray,
     kernel_size: int = 2,
     iterations: int = 1
 ) -> np.ndarray:
-    """
-    فتح مورفولوجي لإزالة النويز الصغير.
-    """
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=iterations)
-    return opened
+    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=iterations)
 
 
 # ============================================================
-# 7. المنظومة الشاملة لتوليد القناع النهائي
+# 6. المولد الهجين الشامل
 # ============================================================
 def generate_hybrid_mask(
     image: np.ndarray,
@@ -433,29 +307,21 @@ def generate_hybrid_mask(
     close_iterations: int = 1,
     open_kernel: int = 2,
     open_iterations: int = 1,
+    max_ray_length: int = 300,
     verbose: bool = True
 ) -> np.ndarray:
     """
-    المولد الهجين الكامل:
-    1. MSER مزدوج (فاتح + غامق) لتحديد المناطق المستقرة.
-    2. SWT بالأشعة المخروطية لحساب سُمك الخطوط.
-    3. الفلاتر الإحصائية السبعة لتصفية المكونات.
-    4. الإغلاق المورفولوجي لسد الثغرات.
-    5. الفتح المورفولوجي لإزالة النويز.
+    توليد القناع الهجين باستخدام MSER + SWT + فلاتر إحصائية.
     """
     start = time.perf_counter()
 
-    # توحيد الصورة إلى float32 [0, 1]
     if image.dtype != np.float32:
         img_float = image.astype(np.float32) / 255.0
     else:
         img_float = image
 
-    # ============================================================
-    # الخطوة 1: MSER المزدوج
-    # ============================================================
     if verbose:
-        print("[MaskGen] تشغيل MSER المزدوج (فاتح + غامق)...")
+        print("[MaskGen] تشغيل MSER المزدوج...")
     
     mser_mask = mser_dual_extraction(
         img_float,
@@ -464,44 +330,41 @@ def generate_hybrid_mask(
         max_area=mser_max_area
     )
 
-    # ============================================================
-    # الخطوة 2: تحويل إلى رمادي وحساب التدرج
-    # ============================================================
     if verbose:
         print("[MaskGen] حساب حقل التدرج...")
     
     gray_uint8 = (img_float * 255).astype(np.uint8)
     gray = cv2.cvtColor(gray_uint8, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-    
-    Gx, Gy, angle = compute_gradient_field(gray)
+    Gx, Gy, _ = compute_gradient_field(gray)
 
-    # ============================================================
-    # الخطوة 3: بناء حافة مرشحة (دمج MSER مع Canny)
-    # ============================================================
     if verbose:
         print("[MaskGen] استخراج الحواف المرشحة...")
     
     canny = cv2.Canny((gray * 255).astype(np.uint8), 50, 150)
     edge_mask = np.logical_or(mser_mask, canny).astype(np.uint8)
 
-    # ============================================================
-    # الخطوة 4: SWT بالأشعة المخروطية
-    # ============================================================
     if verbose:
-        print("[MaskGen] تنفيذ SWT بالأشعة المخروطية (زاوية {:.1f}°)...".format(cone_angle_deg))
+        print(f"[MaskGen] تنفيذ SWT بالأشعة المخروطية (زاوية {cone_angle_deg:.1f}°)...")
     
-    cone_angle_rad = np.radians(cone_angle_deg)
-    swt_map = swt_cone_ray(gray, Gx, Gy, edge_mask, cone_angle_rad)
+    H, W = gray.shape
+    path_buffers_y = np.zeros((H, max_ray_length), dtype=np.int32)
+    path_buffers_x = np.zeros((H, max_ray_length), dtype=np.int32)
+    best_path_buffers_y = np.zeros((H, max_ray_length), dtype=np.int32)
+    best_path_buffers_x = np.zeros((H, max_ray_length), dtype=np.int32)
 
-    # ============================================================
-    # الخطوة 5: الفلاتر الإحصائية
-    # ============================================================
+    cone_angle_rad = np.radians(cone_angle_deg)
+    swt_map = swt_cone_ray(
+        gray, Gx, Gy, edge_mask,
+        path_buffers_y, path_buffers_x,
+        best_path_buffers_y, best_path_buffers_x,
+        cone_angle_rad, max_ray_length
+    )
+
     if verbose:
-        print("[MaskGen] تطبيق الفلاتر الإحصائية السبعة...")
+        print("[MaskGen] تطبيق الفلاتر الإحصائية...")
     
     filtered = apply_statistical_filters(
-        swt_map,
-        gray,
+        swt_map, gray,
         min_stroke_ratio=min_stroke_ratio,
         min_aspect_ratio=min_aspect_ratio,
         max_aspect_ratio=max_aspect_ratio,
@@ -509,20 +372,12 @@ def generate_hybrid_mask(
         max_stroke_relative=max_stroke_relative
     )
 
-    # ============================================================
-    # الخطوة 6: الفتح المورفولوجي (إزالة النويز)
-    # ============================================================
     if verbose:
-        print("[MaskGen] الفتح المورفولوجي لإزالة النويز...")
-    
+        print("[MaskGen] الفتح المورفولوجي...")
     opened = morphological_open(filtered, kernel_size=open_kernel, iterations=open_iterations)
 
-    # ============================================================
-    # الخطوة 7: الإغلاق المورفولوجي (سد الثغرات)
-    # ============================================================
     if verbose:
-        print("[MaskGen] الإغلاق المورفولوجي لسد الثغرات...")
-    
+        print("[MaskGen] الإغلاق المورفولوجي...")
     final_mask = morphological_close(opened, kernel_size=close_kernel, iterations=close_iterations)
 
     elapsed = time.perf_counter() - start
@@ -530,14 +385,13 @@ def generate_hybrid_mask(
         active_pixels = np.sum(final_mask)
         total_pixels = final_mask.shape[0] * final_mask.shape[1]
         coverage = (active_pixels / total_pixels) * 100
-        print(f"[MaskGen] اكتمل توليد القناع في {elapsed:.2f} ثانية.")
-        print(f"[MaskGen] بكسلات نشطة: {active_pixels:,} / {total_pixels:,} ({coverage:.2f}%)")
+        print(f"[MaskGen] اكتمل في {elapsed:.2f} ثانية. بكسلات نشطة: {active_pixels:,} ({coverage:.2f}%)")
 
     return final_mask.astype(np.uint8)
 
 
 # ============================================================
-# 8. دوال مساعدة للتصدير والتحقق
+# 7. دوال مساعدة
 # ============================================================
 def visualize_mask(
     image: np.ndarray,
@@ -545,26 +399,22 @@ def visualize_mask(
     alpha: float = 0.3,
     color: Tuple[int, int, int] = (0, 255, 0)
 ) -> np.ndarray:
-    """
-    رسم القناع فوق الصورة الأصلية للتحقق البصري.
-    """
     img_uint8 = (np.clip(image, 0, 1) * 255).astype(np.uint8)
     overlay = img_uint8.copy()
-    
-    # تلوين مناطق القناع
     overlay[mask == 1] = color
-    
-    # دمج الصورة مع القناع
-    result = cv2.addWeighted(img_uint8, 1 - alpha, overlay, alpha, 0)
-    return result
+    return cv2.addWeighted(img_uint8, 1 - alpha, overlay, alpha, 0)
 
 
-def save_mask(
-    mask: np.ndarray,
-    output_path: str
-) -> None:
-    """
-    حفظ القناع كصورة ثنائية.
-    """
-    mask_uint8 = (mask * 255).astype(np.uint8)
-    cv2.imwrite(output_path, mask_uint8)
+def save_mask(mask: np.ndarray, output_path: str) -> None:
+    cv2.imwrite(output_path, (mask * 255).astype(np.uint8))
+
+
+# ============================================================
+# اختبار سريع
+# ============================================================
+if __name__ == "__main__":
+    H, W = 512, 512
+    img = np.random.rand(H, W, 3).astype(np.float32)
+    img[200:250, 200:300, :] = 0.1
+    mask = generate_hybrid_mask(img, verbose=True)
+    print(f"\n✅ قناع بأبعاد {mask.shape}, نشط: {np.sum(mask):,}")

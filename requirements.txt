@@ -1,0 +1,14 @@
+# الأساسيات الرياضية والمعالجة
+numpy==1.26.4
+numba==0.59.1
+opencv-python-headless==4.9.0.80
+typing-extensions>=4.8.0
+
+# ─── FIX: streamlit>=1.28 removes image_to_url which streamlit-drawable-canvas needs
+# المعادلة: streamlit 1.32.x + canvas 0.9.3 = متوافقان تماماً
+streamlit==1.32.2
+streamlit-drawable-canvas==0.9.3
+pillow>=10.2.0
+
+# مكتبات مساعدة
+requests>=2.31.0
